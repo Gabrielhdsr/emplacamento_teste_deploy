@@ -65,7 +65,7 @@ def carregar_emplacamento(pasta_arquivos: str, ano_minimo: int = 2013) -> pd.Dat
     dfs = []
     for arquivo in arquivos_emplacamento:
         df = pd.read_excel(arquivo, skiprows=3, header=None)
-        df = df.drop(columns=["chassi"], errors="ignore")
+        df = df.drop(columns=[11], axis= 1, errors="ignore")
         dfs.append(df)
     
     # Concatena todos os arquivos
