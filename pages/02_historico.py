@@ -4,15 +4,15 @@ import altair as alt
 
 import data as dt
 import lib as lb
-import ui  # Seu arquivo de design
+import ui
 
 # ============================================================
 # CONFIGURAÇÃO
 # ============================================================
-st.set_page_config(layout="wide", page_title="Histórico de Mercado", page_icon="📊")
+st.set_page_config(layout="wide", page_title="Histórico de Mercado", page_icon="📈")
 
 # ============================================================
-# CARGA DE DADOS
+# DADOS E CONSTANTES
 # ============================================================
 df = dt.carregar_emplacamento('arquivos/Emplacamento/*.xlsx')
 
@@ -20,178 +20,319 @@ SC = "SOBRE CHASSI"
 SR = "SEMIRREBOQUE"
 FACCHINI = "FACCHINI"
 
-# ============================================================
-# FUNÇÕES DE PROCESSAMENTO
-# ============================================================
-def preparar_dados_empilhados(df_raw, tipo_filtro=None):
-    """
-    Prepara dados para gráfico de barras empilhadas (Facchini vs Concorrência).
-    """
-    df_f = df_raw.copy()
-    if tipo_filtro:
-        df_f = df_f[df_f["Tipo"] == tipo_filtro]
-    
-    # Agrupa por Ano e Implementadora (Facchini vs Outros)
-    # Primeiro, marcamos quem é quem
-    df_f['Player'] = df_f['Implementadora'].apply(lambda x: FACCHINI if x == FACCHINI else 'Concorrência')
-    
-    # Agrupamos
-    df_ano = df_f.groupby(['Ano', 'Player'])['Qtde'].sum().reset_index()
-    
-    # Calcula totais para labels
-    df_totais = df_f.groupby('Ano')['Qtde'].sum().reset_index().rename(columns={'Qtde': 'Total_Mercado'})
-    
-    # Junta tudo
-    df_final = pd.merge(df_ano, df_totais, on='Ano')
-    
-    # Ordena para o gráfico (Facchini em baixo ou em cima, conforme preferencia. Normalmente destaque fica na base ou topo)
-    # Vamos deixar Facchini em destaque (cor vermelha)
-    return df_final
+# Cores
+COR_FACCHINI = "#b91c1c"
+COR_MERCADO = "#3b82f6"
+COR_OUTROS = "#94a3b8"
 
-def preparar_ranking_atual(df_raw, ano_foco, tipo_filtro=None):
-    """
-    Gera o ranking das Top 5 + Outros para o ano selecionado.
-    """
-    df_f = df_raw[df_raw["Ano"] == ano_foco].copy()
-    if tipo_filtro:
-        df_f = df_f[df_f["Tipo"] == tipo_filtro]
-        
-    ranking = df_f.groupby("Implementadora")["Qtde"].sum().reset_index()
-    ranking = ranking.sort_values("Qtde", ascending=False)
-    
-    total_ano = ranking["Qtde"].sum()
-    ranking["Share"] = (ranking["Qtde"] / total_ano) * 100
-    
-    # Top 5 e agrupa resto
-    top5 = ranking.head(5).copy()
-    outros_qtd = ranking.iloc[5:]["Qtde"].sum()
-    outros_share = ranking.iloc[5:]["Share"].sum()
-    
-    if outros_qtd > 0:
-        row_outros = pd.DataFrame([{"Implementadora": "OUTROS", "Qtde": outros_qtd, "Share": outros_share}])
-        top5 = pd.concat([top5, row_outros])
-        
-    return top5
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+def get_delta_info(pct):
+    COR_POS_LIGHT = "#4ade80"
+    COR_NEG_LIGHT = "#fca5a5"
+    if pd.isna(pct):
+        return "", "white"
+    sinal = "▲" if pct >= 0 else "▼"
+    delta_txt = f"{sinal} {abs(pct):.1%}".replace('.', ',')
+    cor = COR_POS_LIGHT if pct >= 0 else COR_NEG_LIGHT
+    return delta_txt, cor
+
+# ============================================================
+# PREPARAÇÃO DE DADOS
+# ============================================================
+def preparar_dados_volume_anual(df_raw, tipo=None):
+    df_f = df_raw.copy()
+    if tipo:
+        df_f = df_f[df_f["Tipo"] == tipo]
+
+    # Totais por ano
+    df_totais = (
+        df_f.groupby("Ano")["Qtde"].sum()
+        .reset_index()
+        .rename(columns={"Qtde": "Total_Ano"})
+        .sort_values("Ano")
+    )
+    df_totais["Delta_Pct"] = df_totais["Total_Ano"].pct_change()
+
+    # Facchini por ano
+    df_fac = (
+        df_f[df_f["Implementadora"] == FACCHINI]
+        .groupby("Ano")["Qtde"].sum()
+        .reset_index()
+        .rename(columns={"Qtde": "Vol_Facchini"})
+    )
+
+    df_chart = pd.merge(df_totais, df_fac, on="Ano", how="left").fillna(0)
+    df_chart["Vol_Resto"] = df_chart["Total_Ano"] - df_chart["Vol_Facchini"]
+    df_chart["Share_Facchini"] = df_chart["Vol_Facchini"] / df_chart["Total_Ano"]
+
+    # Heurística visual (tamanho do vermelho vs altura do chart)
+    CHART_HEIGHT_PX = 380
+    MIN_2LIN_PX = 34
+    MIN_1LIN_PX = 18
+
+    max_total = float(df_chart["Total_Ano"].max()) if len(df_chart) else 1.0
+    limiar_2lin = max_total * (MIN_2LIN_PX / CHART_HEIGHT_PX)
+    limiar_1lin = max_total * (MIN_1LIN_PX / CHART_HEIGHT_PX)
+
+    rows = []
+    for _, r in df_chart.iterrows():
+        delta_txt, delta_cor = get_delta_info(r["Delta_Pct"])
+
+        # --- Azul (Mercado) ---
+        y0_m = 0.0
+        y1_m = float(r["Vol_Resto"])
+        rows.append({
+            "Ano": r["Ano"],
+            "Segmento": "Mercado",
+            "Y0": y0_m,
+            "Y1": y1_m,
+            "Y_Texto": (y0_m + y1_m) / 2,
+            "Txt_Cima": lb.formatar_br(r["Total_Ano"]),
+            "Txt_Baixo": delta_txt,
+            "Cor_Txt_Cima": "white",
+            "Cor_Txt_Baixo": delta_cor,
+            "Cor_Barra": COR_MERCADO,
+            "Font_Top": 13,
+            "Font_Bot": 11,
+            "Ordem": 1
+        })
+
+        # --- Vermelho (Facchini) ---
+        altura_vermelho = float(r["Vol_Facchini"])
+        if altura_vermelho <= limiar_1lin:
+            font_top, font_bot = 10, 0
+            txt_baixo = ""
+        elif altura_vermelho <= limiar_2lin:
+            font_top, font_bot = 11, 9
+            txt_baixo = f"{r['Share_Facchini']*100:.1f}%".replace('.', ',')
+        else:
+            font_top, font_bot = 13, 11
+            txt_baixo = f"{r['Share_Facchini']*100:.1f}%".replace('.', ',')
+
+        y0_f = float(r["Vol_Resto"])
+        y1_f = float(r["Total_Ano"])
+        rows.append({
+            "Ano": r["Ano"],
+            "Segmento": "Facchini",
+            "Y0": y0_f,
+            "Y1": y1_f,
+            "Y_Texto": (y0_f + y1_f) / 2,
+            "Txt_Cima": lb.formatar_br(r["Vol_Facchini"]),
+            "Txt_Baixo": txt_baixo,
+            "Cor_Txt_Cima": "white",
+            "Cor_Txt_Baixo": "white",
+            "Cor_Barra": COR_FACCHINI,
+            "Font_Top": font_top,
+            "Font_Bot": font_bot,
+            "Ordem": 2
+        })
+
+    return pd.DataFrame(rows)
+
+def preparar_dados_share_evolution(df_raw, tipo=None):
+    df_f = df_raw.copy()
+    if tipo:
+        df_f = df_f[df_f["Tipo"] == tipo]
+
+    ranking_geral = (
+        df_f[df_f["Implementadora"] != FACCHINI]
+        .groupby("Implementadora")["Qtde"].sum()
+        .sort_values(ascending=False)
+    )
+    top_concorrentes = ranking_geral.head(4).index.tolist()
+
+    def categorizar(imp):
+        if imp == FACCHINI:
+            return FACCHINI
+        if imp in top_concorrentes:
+            return imp
+        return "OUTROS"
+
+    df_f["Player_Chart"] = df_f["Implementadora"].apply(categorizar)
+    df_chart = df_f.groupby(["Ano", "Player_Chart"])["Qtde"].sum().reset_index()
+
+    df_totais = df_f.groupby("Ano")["Qtde"].sum().reset_index().rename(columns={"Qtde": "Total"})
+    df_chart = pd.merge(df_chart, df_totais, on="Ano")
+    df_chart["Share"] = df_chart["Qtde"] / df_chart["Total"]
+
+    return df_chart
 
 # ============================================================
 # GRÁFICOS (ALTAIR)
 # ============================================================
-def plot_mercado_total(df_dados, titulo):
-    # Definindo cores: Facchini Vermelho, Concorrência Cinza
-    scale_color = alt.Scale(domain=[FACCHINI, 'Concorrência'], range=['#dc2626', '#cbd5e1'])
-    
+def plot_historico_volume(df_dados: pd.DataFrame):
+    if df_dados.empty:
+        return alt.Chart(pd.DataFrame({"Ano": [], "Qtde": []})).mark_text(text="Sem dados")
+
+    y_max = float(df_dados["Y1"].max())
+    y_domain_max = y_max * 1.03
+
     base = alt.Chart(df_dados).encode(
-        x=alt.X('Ano:O', title=None),
-        y=alt.Y('Qtde:Q', title='Volume de Vendas'),
-        order=alt.Order('Player', sort='ascending') # Facchini na base ou topo
+        x=alt.X(
+            "Ano:O",
+            axis=alt.Axis(labelAngle=0, title=None, labelFontSize=12, labelFontWeight="bold"),
+            scale=alt.Scale(paddingInner=0.35, paddingOuter=0.2)
+        )
     )
 
-    # Barras Empilhadas
-    bars = base.mark_bar(size=40).encode(
-        color=alt.Color('Player', scale=scale_color, legend=alt.Legend(title="Composição")),
-        tooltip=['Ano', 'Player', 'Qtde', alt.Tooltip('Total_Mercado', title='Mercado Total')]
-    )
-
-    # Texto com o Total no topo da barra
-    # Para isso, usamos o dataset de totais (apenas um registro por ano)
-    text_total = alt.Chart(df_dados.drop_duplicates('Ano')).mark_text(
-        dy=-10, color='#1e293b', fontWeight='bold'
-    ).encode(
-        x=alt.X('Ano:O'),
-        y=alt.Y('Total_Mercado:Q'),
-        text=alt.Text('Total_Mercado:Q', format='.')
-    )
-    
-    # Texto com o valor da Facchini (dentro da barra vermelha)
-    text_facchini = base.mark_text(dy=0, color='white', fontWeight='bold').encode(
-        text=alt.Text('Qtde:Q', format='.'),
-        opacity=alt.condition(alt.datum.Player == FACCHINI, alt.value(1), alt.value(0))
-    )
-
-    chart = (bars + text_total + text_facchini).properties(
-        title=titulo,
-        height=400
-    )
-    return chart
-
-def plot_pizza_share(df_ranking, titulo):
-    base = alt.Chart(df_ranking).encode(
-        theta=alt.Theta("Qtde", stack=True)
-    )
-    
-    # Cores: Destaca Facchini, outros em tons de cinza/azul
-    pie = base.mark_arc(outerRadius=120).encode(
-        color=alt.Color("Implementadora", 
-                        scale=alt.Scale(domain=[FACCHINI, 'OUTROS'], range=['#dc2626', '#94a3b8']), 
-                        legend=None), # Legenda customizada ou automática
-        order=alt.Order("Qtde", sort="descending"),
-        tooltip=["Implementadora", "Qtde", alt.Tooltip("Share", format=".1f")]
-    )
-    
-    text = base.mark_text(radius=140).encode(
-        text=alt.Text("Share", format=".1f"),
-        order=alt.Order("Qtde", sort="descending"),
-        color=alt.value("black")  
-    )
-    
-    # Vamos usar um gráfico de barras horizontal simples para o ranking, é mais "profissional" que pizza as vezes
-    # Mas como pediu "distribuição", vamos de Barras Horizontais com Facchini destacada
-    
-    bars = alt.Chart(df_ranking).mark_bar().encode(
-        x=alt.X('Share:Q', title='Market Share (%)'),
-        y=alt.Y('Implementadora:N', sort='-x', title=None),
-        color=alt.condition(
-            alt.datum.Implementadora == FACCHINI,
-            alt.value('#dc2626'),  # Vermelho se for Facchini
-            alt.value('#cbd5e1')   # Cinza se não for
+    # AZUL: aqui fica o eixo Y com GRID (garante que aparece)
+    bars_azul = base.transform_filter(
+        alt.datum.Segmento == "Mercado"
+    ).mark_bar(size=52).encode(
+        y=alt.Y(
+            "Y1:Q",
+            scale=alt.Scale(domain=[0, y_domain_max]),
+            axis=alt.Axis(
+                title=None,
+                labels=False,
+                ticks=False,
+                grid=True,
+                gridColor="#e2e8f0",
+                gridDash=[4, 4],
+                domain=False
+            )
         ),
-        tooltip=['Implementadora', 'Qtde', alt.Tooltip('Share', format='.1f')]
+        y2="Y0:Q",
+        color=alt.Color("Cor_Barra:N", scale=None, legend=None)
     )
-    
-    text_bar = bars.mark_text(align='left', dx=2).encode(
-        text=alt.Text('Share:Q', format='.1f')
+
+    # VERMELHO: topo arredondado
+    bars_vermelho = base.transform_filter(
+        alt.datum.Segmento == "Facchini"
+    ).mark_bar(
+        size=52,
+        cornerRadiusTopLeft=6,
+        cornerRadiusTopRight=6
+    ).encode(
+        y=alt.Y("Y1:Q", scale=alt.Scale(domain=[0, y_domain_max]), axis=None),
+        y2="Y0:Q",
+        color=alt.Color("Cor_Barra:N", scale=None, legend=None)
     )
-    
-    return (bars + text_bar).properties(title=titulo, height=300)
+
+    # Texto linha 1
+    txt_top = base.mark_text(dy=-6, fontWeight="bold").encode(
+        y=alt.Y("Y_Texto:Q", scale=alt.Scale(domain=[0, y_domain_max])),
+        text="Txt_Cima:N",
+        color=alt.Color("Cor_Txt_Cima:N", scale=None),
+        size=alt.Size("Font_Top:Q", scale=None, legend=None)
+    )
+
+    # Texto linha 2 (só quando Font_Bot > 0)
+    txt_bot = base.transform_filter(
+        alt.datum.Font_Bot > 0
+    ).mark_text(dy=10, fontWeight="bold").encode(
+        y=alt.Y("Y_Texto:Q", scale=alt.Scale(domain=[0, y_domain_max])),
+        text="Txt_Baixo:N",
+        color=alt.Color("Cor_Txt_Baixo:N", scale=None),
+        size=alt.Size("Font_Bot:Q", scale=None, legend=None)
+    )
+
+    return (bars_azul + bars_vermelho + txt_top + txt_bot).properties(
+        height=380,
+        background="white"
+    ).configure_view(
+        strokeWidth=0,
+        fill="white"
+    )
+
+def plot_evolucao_share(df_dados):
+    top_players = (
+        df_dados.groupby("Player_Chart")["Qtde"].sum()
+        .sort_values(ascending=False)
+        .index.tolist()
+    )
+    if FACCHINI in top_players:
+        top_players.remove(FACCHINI)
+    if "OUTROS" in top_players:
+        top_players.remove("OUTROS")
+
+    stack_order = [FACCHINI] + top_players + ["OUTROS"]
+
+    colors = (
+        [COR_FACCHINI] +
+        ["#1e40af", "#3b82f6", "#60a5fa", "#93c5fd"][:len(top_players)] +
+        [COR_OUTROS]
+    )
+
+    base = alt.Chart(df_dados).encode(
+        x=alt.X("Ano:O", axis=alt.Axis(labelAngle=0, title=None, labelFontSize=12)),
+        y=alt.Y(
+            "Qtde:Q",
+            stack="normalize",
+            axis=alt.Axis(format=".0%", title=None, grid=False)
+        ),
+        order=alt.Order("Player_Chart"),
+        color=alt.Color(
+            "Player_Chart",
+            scale=alt.Scale(domain=stack_order, range=colors),
+            legend=alt.Legend(title="Players", orient="bottom", columns=3)
+        ),
+        tooltip=["Ano", "Player_Chart", alt.Tooltip("Share", format=".1%")]
+    )
+
+    return base.mark_area(opacity=0.9).properties(
+        height=380,
+        background="white"
+    ).configure_view(
+        strokeWidth=0,
+        fill="white"
+    )
 
 # ============================================================
-# PÁGINA
+# LAYOUT
 # ============================================================
-ui.header("Evolução de Mercado", "Volume Total e Market Share • 2013 a 2025")
+ui.header("Histórico & Tendências", "Evolução anual de <b>Volume</b> e <b>Market Share</b>")
 ui.apply_style()
 
-# 1. GRÁFICO PRINCIPAL (CONSOLIDADO)
-ui.section("Mercado Total (Consolidado)")
-df_stack_cons = preparar_dados_empilhados(df)
-st.altair_chart(plot_mercado_total(df_stack_cons, ""), use_container_width=True)
+# (opcional) reforça branco no svg em alguns temas
+st.markdown("""
+<style>
+div[data-testid="stAltairChart"] svg { background: white !important; }
+</style>
+""", unsafe_allow_html=True)
 
-# 2. GRÁFICOS SEGMENTADOS (LADO A LADO)
-ui.section("Detalhamento por Segmento")
-col1, col2 = st.columns(2)
+# --- SEÇÃO 1: CONSOLIDADO ---
+ui.section("1. Visão Consolidada (Mercado Total)")
+c1_vol, c1_share = st.columns(2, gap="large")
 
-with col1:
-    st.markdown(f"#### {SC}")
-    df_stack_sc = preparar_dados_empilhados(df, SC)
-    st.altair_chart(plot_mercado_total(df_stack_sc, ""), use_container_width=True)
+with c1_vol:
+    st.markdown("##### 📦 Evolução de Volume")
+    df_vol_total = preparar_dados_volume_anual(df)
+    st.altair_chart(plot_historico_volume(df_vol_total), use_container_width=True)
 
-with col2:
-    st.markdown(f"#### {SR}")
-    df_stack_sr = preparar_dados_empilhados(df, SR)
-    st.altair_chart(plot_mercado_total(df_stack_sr, ""), use_container_width=True)
+with c1_share:
+    st.markdown("##### 🥧 Evolução de Share (%)")
+    df_share_total = preparar_dados_share_evolution(df)
+    st.altair_chart(plot_evolucao_share(df_share_total), use_container_width=True)
 
-# 3. DISTRIBUIÇÃO DE SHARE (RANKING)
-ui.section("Posição Competitiva (Ranking)")
-st.caption(f"Comparativo de Market Share: Facchini vs Principais Concorrentes ({df['Ano'].max()})")
+# --- SEÇÃO 2: SOBRE CHASSI ---
+st.write("---")
+ui.section(f"2. Segmento: {SC}")
+c2_vol, c2_share = st.columns(2, gap="large")
 
-col_rank_sc, col_rank_sr = st.columns(2)
-ano_atual = df["Ano"].max()
+with c2_vol:
+    st.markdown(f"##### 📦 Volume: {SC}")
+    df_vol_sc = preparar_dados_volume_anual(df, SC)
+    st.altair_chart(plot_historico_volume(df_vol_sc), use_container_width=True)
 
-with col_rank_sc:
-    st.markdown(f"**Ranking: {SC} ({ano_atual})**")
-    df_rank_sc = preparar_ranking_atual(df, ano_atual, SC)
-    st.altair_chart(plot_pizza_share(df_rank_sc, ""), use_container_width=True)
+with c2_share:
+    st.markdown(f"##### 🥧 Share: {SC}")
+    df_share_sc = preparar_dados_share_evolution(df, SC)
+    st.altair_chart(plot_evolucao_share(df_share_sc), use_container_width=True)
 
-with col_rank_sr:
-    st.markdown(f"**Ranking: {SR} ({ano_atual})**")
-    df_rank_sr = preparar_ranking_atual(df, ano_atual, SR)
-    st.altair_chart(plot_pizza_share(df_rank_sr, ""), use_container_width=True)
+# --- SEÇÃO 3: SEMIRREBOQUE ---
+st.write("---")
+ui.section(f"3. Segmento: {SR}")
+c3_vol, c3_share = st.columns(2, gap="large")
+
+with c3_vol:
+    st.markdown(f"##### 📦 Volume: {SR}")
+    df_vol_sr = preparar_dados_volume_anual(df, SR)
+    st.altair_chart(plot_historico_volume(df_vol_sr), use_container_width=True)
+
+with c3_share:
+    st.markdown(f"##### 🥧 Share: {SR}")
+    df_share_sr = preparar_dados_share_evolution(df, SR)
+    st.altair_chart(plot_evolucao_share(df_share_sr), use_container_width=True)

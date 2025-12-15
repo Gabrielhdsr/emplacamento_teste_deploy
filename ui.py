@@ -69,20 +69,55 @@ def section(titulo):
     html = f"<div class='section-divider'><div class='section-title'>{titulo}</div><div class='divider-line'></div></div>"
     st.markdown(_clean_html(html), unsafe_allow_html=True)
 
-def kpi_card(label, value, delta_val, delta_fmt, context_html, is_percent=False, color=None):
-    delta_num = delta_val
-    cls = "delta-pos" if delta_num > 0 else "delta-neg" if delta_num < 0 else "delta-neu"
-    icon = "▲" if delta_num > 0 else "▼" if delta_num < 0 else "—"
+def kpi_card(
+    label,
+    value,
+    delta_val=None,
+    delta_fmt="",
+    context_html="",
+    is_percent=False,
+    color=None,
+    show_delta=True
+):
+    """
+    KPI Card padrão.
+
+    - show_delta=True  -> comportamento antigo (mostra badge de delta)
+    - show_delta=False -> card limpo, sem delta
+    """
+
+    # Classe do delta
+    if delta_val is None:
+        cls = "delta-neu"
+        icon = "—"
+    else:
+        cls = "delta-pos" if delta_val > 0 else "delta-neg" if delta_val < 0 else "delta-neu"
+        icon = "▲" if delta_val > 0 else "▼" if delta_val < 0 else "—"
+
     border = f"border-left-{color}" if color else ""
-    
+
+    delta_html = (
+        f"<div class='delta-badge {cls}'>{icon} {delta_fmt}</div>"
+        if show_delta
+        else ""
+    )
+
     html = f"""
     <div class="metric-card {border}">
-        <div><div class="metric-label">{label}</div><div class="metric-value">{value}</div></div>
-        <div class="metric-footer">
-            <div style="font-size:0.85rem; color:#94a3b8; line-height:1.4">{context_html}</div>
-            <div class="delta-badge {cls}">{icon} {delta_fmt}</div>
+        <div>
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
         </div>
-    </div>"""
+
+        <div class="metric-footer">
+            <div style="font-size:0.85rem; color:#94a3b8; line-height:1.4">
+                {context_html}
+            </div>
+            {delta_html}
+        </div>
+    </div>
+    """
+
     return _clean_html(html)
 
 def quarter_card(periodo, value_str, delta_val, delta_str, html_share, val_ant_str, is_future=False, color=None):
