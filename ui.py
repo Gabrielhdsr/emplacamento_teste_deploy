@@ -11,7 +11,7 @@ def apply_style():
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
         
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: #1e293b; }
-        .stApp { background-color: #f5f5f5; }
+        .stApp { background-color: #fffff; }
         header[data-testid="stHeader"] { display: none; }
         
         .block-container { padding-top: 0.5rem !important; padding-bottom: 2rem !important; max-width: 1600px; } 

@@ -419,7 +419,7 @@ def bar_rank(df_in: pd.DataFrame, dim: str, val: str, sel, title: str, color: st
     if dfp.empty:
         return alt.Chart(pd.DataFrame({dim: [], val: []})).mark_bar().properties(height=height, title=title)
 
-    # 1. Formata o número (Valor)
+    # 1) Formata o valor
     if fmt == "pp":
         dfp["_lab"] = dfp[val].apply(lambda x: "—" if pd.isna(x) else f"{float(x):+.1f} pp")
         x_format = None
@@ -430,37 +430,38 @@ def bar_rank(df_in: pd.DataFrame, dim: str, val: str, sel, title: str, color: st
         dfp["_lab"] = dfp[val].apply(fmt_int)
         x_format = ",.0f"
 
-    # 2. O TRUQUE: Junta Nome + Valor para exibir no eixo Y
-    # Isso evita criar duas camadas (bar + text), permitindo que o clique funcione!
-    # Exemplo visual: "TRANSPORTADORA ABC ... [ 1.500 ]"
-    dfp["__y"] = dfp[dim].astype(str).str.slice(0, 25) + "  [" + dfp["_lab"].astype(str) + "]"
+    # 2) Nome com reticências (mais elegante que cortar seco)
+    def _ellipsis(s: str, n: int = 28) -> str:
+        s = "" if s is None else str(s)
+        return (s[: n - 1] + "…") if len(s) > n else s
 
-    # 3. Configura o Eixo Y para ficar na direita (mais moderno)
+    dfp["_dim_short"] = dfp[dim].apply(_ellipsis)
+
+    # 3) Rótulo único (1 camada) com separador clean
+    # espaços finos: \u2009
+    dfp["__y"] = dfp["_dim_short"].astype(str) + "\u2009\u2009·\u2009" + dfp["_lab"].astype(str)
+
     axis_right = alt.Axis(
-        orient="right", 
-        title=None, 
-        labelFontSize=12, 
-        ticks=False, 
-        domain=False, 
+        orient="right",
+        title=None,
+        labelFont="Segoe UI, Roboto, Arial, sans-serif",
+        labelFontSize=12,
+        labelFontWeight=500,     # leve (não tão escuro)
+        labelColor="#3a3a3a",    # só um pouco mais escuro
+        ticks=False,
+        domain=False,
         labelPadding=10,
-        labelLimit=300 # Permite textos mais longos
+        labelLimit=320,
+        grid=False
     )
 
-    # 4. Gráfico de ÚNICA CAMADA (Só Barra)
     return (
         alt.Chart(dfp)
         .mark_bar(color=color, cornerRadiusEnd=4)
         .encode(
-            # Eixo X: Valor numérico (Barra) - Sem título pra limpar
-            x=alt.X(f"{val}:Q", title=None, axis=None), 
-            
-            # Eixo Y: O texto combinado (Nome + Valor)
+            x=alt.X(f"{val}:Q", title=None, axis=None),
             y=alt.Y("__y:N", sort="-x", axis=axis_right),
-            
-            # Opacidade muda ao clicar
             opacity=alt.condition(sel, alt.value(1), alt.value(0.55)),
-            
-            # Tooltip completo
             tooltip=[
                 alt.Tooltip(f"{dim}:N", title=dim),
                 alt.Tooltip(f"{val}:Q", title="Valor", format=x_format if x_format else ""),
@@ -509,622 +510,199 @@ def scatter_carteira(df_in: pd.DataFrame, sel):
     )
 
 # ============================================================
-# 1) VISÃO MACRO
+# 1) VISÃO MACRO: LISTA COMPLETA (SEM TEXTO LATERAL PARA HABILITAR CLIQUE)
 # ============================================================
-ui.section("🏆 1) Top Clientes do Mercado (Quem movimenta o ponteiro)")
+ui.section("🏆 1) Ranking de Clientes (Role para ver todos, Clique para filtrar)")
 
-# Filtra os Top 15 Clientes por Volume Total de Mercado
-df_top_market = df_clients.sort_values("Market", ascending=False).head(15).copy()
+# 1. PREPARAÇÃO DOS DADOS (Base completa ordenada)
+df_all_sorted = df_clients.sort_values("Market", ascending=False).copy()
 
-# KPIs laterais baseados nesse Top 15
-top_vol = df_top_market["Market"].sum()
-top_fac = df_top_market["Facchini"].sum()
-top_share = (top_fac / top_vol) if top_vol > 0 else 0
-top_ws = df_top_market["WhiteSpace"].sum()
+# KPIs DA BASE INTEIRA
+all_vol = df_all_sorted["Market"].sum()
+all_fac = df_all_sorted["Facchini"].sum()
+all_share = (all_fac / all_vol) if all_vol > 0 else 0
+all_ws = df_all_sorted["WhiteSpace"].sum()
 
-c_top_chart, c_top_kpi = st.columns([2.5, 1], gap="large")
+# Cálculo da altura dinâmica
+n_clientes = len(df_all_sorted)
+altura_por_barra = 30 
+altura_total_grafico = max(500, n_clientes * altura_por_barra)
 
-with c_top_chart:
-    st.markdown("##### Ranking por Volume Total de Compras")
+# 2. CARD ROBUSTO
+def card_robust_dark(label, value, sub, color_border="#94a3b8"):
+    return f"""
+    <div style="
+        background-color: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-left: 5px solid {color_border};
+        border-radius: 8px;
+        padding: 15px 14px;
+        margin-bottom: 12px;
+        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
+        display: flex; flex-direction: column; gap: 4px;
+    ">
+        <div style="font-size: 0.7rem; text-transform: uppercase; font-weight: 700; color: #64748b; letter-spacing: 0.05em;">{label}</div>
+        <div style="font-size: 1.6rem; font-weight: 800; color: #1e293b; line-height: 1.0;">{value}</div>
+        <div style="font-size: 0.85rem; color: #334155; font-weight: 500;">{sub}</div>
+    </div>
+    """
+
+# 3. LAYOUT
+c_chart_scroll, c_kpi_fixed = st.columns([3.8, 1], gap="small")
+
+with c_chart_scroll:
+    st.markdown("##### 📊 Ranking Completo (Role a lista 👇)")
+    
     sel_top = alt.selection_point(fields=["Cliente"], name="SEL_TOP_MKT", clear="dblclick")
-    
-    # Gráfico de Barras Horizontais (Mercado)
-    # Usamos o helper bar_rank mas customizamos para mostrar mercado
-    ch_top = bar_rank(
-        df_top_market, 
-        "Cliente", 
-        "Market", 
-        sel_top, 
-        "", 
-        C_GRAY, 
-        "int", 
-        500
+    nova_paleta = ["#ff7777", "#fd2727", "#ff0000", "#be0000", "#990000"]
+
+    # GRÁFICO DE CAMADA ÚNICA (BARRAS) - Essencial para o clique funcionar
+    ch_full = alt.Chart(df_all_sorted).mark_bar(
+        cornerRadiusEnd=4,
+        height=22
+    ).encode(
+        x=alt.X("Market:Q", title=None, axis=None), # Sem eixo X
+        y=alt.Y("Cliente:N", sort="-x", axis=alt.Axis(
+            title=None, 
+            labelLimit=250, 
+            labelFontSize=12, 
+            labelFontWeight=600, 
+            labelColor="#334155",
+            grid=False # Sem linhas de grade
+        )),
+        color=alt.condition(
+            alt.datum.Share_Fac == 0,
+            alt.value("#cbd5e1"),
+            alt.Color("Share_Fac:Q", 
+                      scale=alt.Scale(domain=[0, 0.25, 0.5, 0.75, 1], range=nova_paleta), 
+                      legend=None)
+        ),
+        opacity=alt.condition(sel_top, alt.value(1), alt.value(0.4)),
+        tooltip=[
+            alt.Tooltip("Cliente"), 
+            alt.Tooltip("Market", title="Mercado Total", format=",.0f"),
+            alt.Tooltip("Facchini", title="Vol. Facchini", format=",.0f"),
+            alt.Tooltip("Share_Fac", title="Share Atual", format=".1%")
+        ]
+    ).add_params(sel_top).properties(
+        height=altura_total_grafico
+    ).configure_view(
+        stroke=None 
     )
-    st.altair_chart(ch_top, use_container_width=True, on_select="rerun", key="chart_top_mkt")
+
+    with st.container(height=520, border=False):
+        # Agora funciona o on_select pois é um gráfico simples (só barras), sem camadas extras
+        st.altair_chart(ch_full, use_container_width=True, on_select="rerun", key="chart_top_mkt_full")
+
+with c_kpi_fixed:
+    st.markdown("##### 🔎 Raio-X (Total)")
     
-    # Lógica de clique
-    click_top = selected_value_from_chart_state("chart_top_mkt", "SEL_TOP_MKT", "Cliente")
+    st.markdown(card_robust_dark("Potencial Total", fmt_int(all_vol), "Soma da Carteira", "#94a3b8"), unsafe_allow_html=True)
+    st.markdown(card_robust_dark("Carteira Facchini", fmt_int(all_fac), f"Share Global: <b>{all_share:.1%}</b>", "#ef4444"), unsafe_allow_html=True)
+    st.markdown(card_robust_dark("Dinheiro na Mesa", fmt_int(all_ws), "Oportunidade Total", "#3b82f6"), unsafe_allow_html=True)
+    
+    st.caption("🎨 **Intensidade:**")
+    legenda_html = f"""
+    <div style="font-size: 0.75rem; color: #475569; line-height: 1.5; display: flex; flex-direction: column; gap: 3px;">
+        <div style="display:flex; align-items:center; gap:6px;"><div style="width:10px; height:10px; background:#cbd5e1; border-radius:2px;"></div> 0%</div>
+        <div style="display:flex; align-items:center; gap:6px;"><div style="width:10px; height:10px; background:{nova_paleta[0]}; border-radius:2px;"></div> < 25%</div>
+        <div style="display:flex; align-items:center; gap:6px;"><div style="width:10px; height:10px; background:{nova_paleta[2]}; border-radius:2px;"></div> ~ 50%</div>
+        <div style="display:flex; align-items:center; gap:6px;"><div style="width:10px; height:10px; background:{nova_paleta[4]}; border-radius:2px;"></div> 100%</div>
+    </div>
+    """
+    st.markdown(legenda_html, unsafe_allow_html=True)
+
+    click_top = selected_value_from_chart_state("chart_top_mkt_full", "SEL_TOP_MKT", "Cliente")
     if click_top:
-         st.session_state.update({"cli_focus": str(click_top), "cli_uf_focus": None, "cli_mix_focus": None})
+         st.session_state["cli_focus"] = str(click_top)
+         st.session_state["cli_uf_focus"] = None
+         st.session_state["cli_mix_focus"] = None
 
-with c_top_kpi:
-    st.markdown("##### Raio-X do Top 15")
-    st.markdown(small_metric("Volume Total", fmt_int(top_vol), "Soma do Top 15", "kpi-gray"), unsafe_allow_html=True)
-    st.write("")
-    st.markdown(small_metric("Vol. FACCHINI", fmt_int(top_fac), f"Share no Top 15: {top_share:.1%}", "kpi-red"), unsafe_allow_html=True)
-    st.write("")
-    st.markdown(small_metric("Espaço (WhiteSpace)", fmt_int(top_ws), "Volume na concorrência", "kpi-blue"), unsafe_allow_html=True)
-    st.write("")
-    
-    # Mini lista dos nomes
-    st.caption("**Principais nomes:**")
-    st.markdown(
-        f"<div style='font-size:0.85em; color:#64748b; line-height:1.4;'>{', '.join(df_top_market['Cliente'].head(5).tolist())}...</div>", 
-        unsafe_allow_html=True
-    )
-
-st.write("---")
+st.markdown("<hr style='margin: 10px 0; opacity: 0.1;'>", unsafe_allow_html=True)
 
 # ============================================================
-# 2) TRIPÉ DE ANÁLISE: DOMÍNIO, CONCORRÊNCIA E PERDA
+# 2) TRIPÉ TÁTICO: ONDE AGIR
 # ============================================================
-ui.section("📊 2) Análise de Posicionamento e Risco")
+ui.section("📊 2) Tripé Tático (Filtre por Oportunidade)")
 
-col_dom, col_conc, col_loss = st.columns(3, gap="large")
+# Prepara os DataFrames
+df_dom = df_clients[df_clients["Share_Fac"] >= 0.50].sort_values("Facchini", ascending=False).head(10)
+df_ws  = df_clients.sort_values("WhiteSpace", ascending=False).head(10)
 
-# --- COLUNA 1: DOMÍNIO FACCHINI (Share > 50%) ---
-with col_dom:
-    st.markdown("##### 🛡️ Fortaleza FACCHINI")
-    st.caption("Maiores clientes onde **somos líderes** (>50% Share).")
+# Tratamento para Perda (precisa ter a coluna ImpactShare)
+if "ImpactShare" in df_clients.columns:
+    # Filtra negativos significativos (< -0.5 para evitar ruído de zero)
+    df_loss = df_clients[df_clients["ImpactShare"] < -0.5].sort_values("ImpactShare", ascending=True).head(10)
+    # Truque visual: converte para positivo para o gráfico, mas mantemos a cor de alerta
+    df_loss["AbsLoss"] = df_loss["ImpactShare"].abs()
+else:
+    df_loss = pd.DataFrame()
+
+c_dom, c_conc, c_loss = st.columns(3, gap="large")
+
+# --- 1. DOMÍNIO (Manter) ---
+with c_dom:
+    vol_dom = int(df_dom["Facchini"].sum())
+    st.markdown(f"##### 🛡️ Fortaleza ({len(df_dom)})")
+    st.caption(f"Clientes com Share > 50%. Vol: **{fmt_int(vol_dom)}**")
     
-    # Filtra Share > 50% e ordena por Volume FACCHINI (para pegar os grandes parceiros)
-    df_dom = df_clients[df_clients["Share_Fac"] >= 0.50].sort_values("Facchini", ascending=False).head(10)
-    
-    if df_dom.empty:
-        st.info("Nenhum cliente com share > 50% no recorte.")
-    else:
+    if not df_dom.empty:
         sel_dom = alt.selection_point(fields=["Cliente"], name="SEL_DOM", clear="dblclick")
-        ch_dom = bar_rank(df_dom, "Cliente", "Facchini", sel_dom, "Volume FACCHINI (Share > 50%)", C_FAC, "int", 400)
+        # Note que passamos sel_dom para o helper bar_rank
+        ch_dom = bar_rank(df_dom, "Cliente", "Facchini", sel_dom, "", C_GREEN, "int", 350)
+        
         st.altair_chart(ch_dom, use_container_width=True, on_select="rerun", key="chart_dom")
         
+        # Captura clique
         click_dom = selected_value_from_chart_state("chart_dom", "SEL_DOM", "Cliente")
         if click_dom:
-             st.session_state.update({"cli_focus": str(click_dom), "cli_uf_focus": None, "cli_mix_focus": None})
+             st.session_state["cli_focus"] = str(click_dom)
+    else:
+        st.info("Nenhum cliente dominado neste recorte.")
 
-# --- COLUNA 2: DOMÍNIO CONCORRÊNCIA (Maior WhiteSpace) ---
-with col_conc:
-    st.markdown("##### ⚔️ Terreno da Concorrência")
-    st.caption("Onde a **concorrência vende mais** (Maior WhiteSpace).")
+# --- 2. ATAQUE (Conquistar) ---
+with c_conc:
+    vol_ws = int(df_ws["WhiteSpace"].sum())
+    st.markdown(f"##### ⚔️ Ataque ({len(df_ws)})")
+    st.caption(f"Maior espaço em branco. Potencial: **{fmt_int(vol_ws)}**")
     
-    # Ordena por WhiteSpace (Mercado - Facchini)
-    df_ws = df_clients.sort_values("WhiteSpace", ascending=False).head(10)
-    
-    sel_ws = alt.selection_point(fields=["Cliente"], name="SEL_WS", clear="dblclick")
-    ch_ws = bar_rank(df_ws, "Cliente", "WhiteSpace", sel_ws, "Volume da Concorrência", C_COMP, "int", 400)
-    st.altair_chart(ch_ws, use_container_width=True, on_select="rerun", key="chart_ws")
-    
-    click_ws = selected_value_from_chart_state("chart_ws", "SEL_WS", "Cliente")
-    if click_ws:
-         st.session_state.update({"cli_focus": str(click_ws), "cli_uf_focus": None, "cli_mix_focus": None})
-
-# --- COLUNA 3: MAIOR PERDA DE VOLUME (ImpactShare Negativo) ---
-with col_loss:
-    st.markdown("##### 🚨 Alerta de Perda")
-    st.caption("Onde mais **perdemos volume** (vs Ano Anterior).")
-    
-    # Verifica se temos dados de YoY
-    if "ImpactShare" in df_clients.columns and df_clients["ImpactShare"].notna().any():
-        # Filtra apenas quem perdeu (negativo) e ordena pelo mais negativo (ascending=True)
-        df_loss = df_clients[df_clients["ImpactShare"] < 0].sort_values("ImpactShare", ascending=True).head(10)
+    if not df_ws.empty:
+        sel_ws = alt.selection_point(fields=["Cliente"], name="SEL_WS", clear="dblclick")
+        # Usamos WhiteSpace como métrica
+        ch_ws = bar_rank(df_ws, "Cliente", "WhiteSpace", sel_ws, "", C_AMB, "int", 350) 
         
-        # Transformamos em positivo apenas para o gráfico ficar visualmente compreensível (barra de tamanho de perda)
-        # Ou mantemos negativo para mostrar retração. Vamos manter negativo e pintar de roxo/risco.
+        st.altair_chart(ch_ws, use_container_width=True, on_select="rerun", key="chart_ws")
         
-        if df_loss.empty:
-            st.success("Sem perdas relevantes de share/volume neste recorte.")
+        # Captura clique
+        click_ws = selected_value_from_chart_state("chart_ws", "SEL_WS", "Cliente")
+        if click_ws:
+             st.session_state["cli_focus"] = str(click_ws)
+    else:
+        st.info("Sem oportunidades claras de ataque.")
+
+# --- 3. PERDA (Risco) ---
+with c_loss:
+    # Soma das perdas (que estão negativas)
+    loss_val = df_loss["ImpactShare"].sum() if not df_loss.empty else 0
+    st.markdown(f"##### 🚨 Sangramento ({len(df_loss)})")
+    st.caption(f"Perda de volume vs Ano anterior: **{fmt_int(loss_val)}**")
+    
+    if not df_loss.empty:
+        sel_loss = alt.selection_point(fields=["Cliente"], name="SEL_LOSS", clear="dblclick")
+        # Usamos AbsLoss para a barra crescer pra direita, mas cor de RISCO
+        ch_loss = bar_rank(df_loss, "Cliente", "AbsLoss", sel_loss, "", C_RISK, "int", 350)
+        
+        st.altair_chart(ch_loss, use_container_width=True, on_select="rerun", key="chart_loss")
+        
+        # Captura clique
+        click_loss = selected_value_from_chart_state("chart_loss", "SEL_LOSS", "Cliente")
+        if click_loss:
+             st.session_state["cli_focus"] = str(click_loss)
+    else:
+        if ano_comp == "—":
+            st.warning("Selecione um ano comparativo no topo.")
         else:
-            sel_loss = alt.selection_point(fields=["Cliente"], name="SEL_LOSS", clear="dblclick")
-            # Usamos ImpactShare que é (DeltaShare * Mercado), uma aproximação fiel da perda de volume por performance
-            ch_loss = bar_rank(df_loss, "Cliente", "ImpactShare", sel_loss, "Volume Perdido (Estimado)", C_RISK, "int", 400)
-            st.altair_chart(ch_loss, use_container_width=True, on_select="rerun", key="chart_loss")
-            
-            click_loss = selected_value_from_chart_state("chart_loss", "SEL_LOSS", "Cliente")
-            if click_loss:
-                 st.session_state.update({"cli_focus": str(click_loss), "cli_uf_focus": None, "cli_mix_focus": None})
-    else:
-        st.warning("Selecione um 'Ano Comparativo' no topo para ver perdas.")
+            st.success("Nenhuma perda relevante de share.")
 
 st.write("---")
 
-# ============================================================
-# 2) RELEVANTES (+/−) + POTENCIAIS
-# ============================================================
-ui.section("⭐ 2) Relevância (+/−) e 🎯 Potenciais")
-
-TOP_RELEVANTES = 300  # ajuste aqui
-df_rel = df_clients.sort_values("Market", ascending=False).head(TOP_RELEVANTES).copy()
-
-rep_market = float(df_rel["Market"].sum())
-rep_share  = (rep_market / float(df_clients["Market"].sum())) if float(df_clients["Market"].sum()) > 0 else 0
-
-# Card de cobertura (clientes + mercado representado)
-c_cov1, c_cov2, c_cov3 = st.columns([2.3, 1.2, 1.2], gap="medium")
-with c_cov1:
-    st.caption(f"Rankings e análises usando os {len(df_rel)} clientes com maior Mercado (Qtde).")
-with c_cov2:
-    st.markdown(
-        small_metric("Clientes analisados", fmt_int(len(df_rel)), f"de {fmt_int(len(df_clients))} no recorte", "kpi-gray"),
-        unsafe_allow_html=True
-    )
-with c_cov3:
-    st.markdown(
-        small_metric("Mercado representado", fmt_int(rep_market), f"{fmt_pct(rep_share)} do mercado do recorte", "kpi-gray"),
-        unsafe_allow_html=True
-    )
-
-TOP = 12
-colA, colB, colC, colD = st.columns(4, gap="large")
-
-# Se não tem YoY, troca "melhores/piores" por share atual
-has_yoy = (ano_comp != "—") and df_rel["ImpactShare"].notna().any()
-
-with colA:
-    if has_yoy:
-        st.markdown("##### ✅ Melhores (ganho relevante)")
-        df_best = df_rel.sort_values("ImpactShare", ascending=False).head(TOP)
-        sel_best = alt.selection_point(fields=["Cliente"], name="SEL_BEST", clear="dblclick")
-        ch = bar_rank(df_best, "Cliente", "ImpactShare", sel_best, "Maior ganho (Qtde) via share", C_GREEN, "int", 420)
-        with st.container(height=480, border=False):
-            st.altair_chart(ch, use_container_width=True, on_select="rerun", key=K_BEST)
-        click = selected_value_from_chart_state(K_BEST, "SEL_BEST", "Cliente")
-    else:
-        st.markdown("##### ✅ Maior Share FACCHINI")
-        df_best = df_rel.sort_values("Share_Fac", ascending=False).head(TOP)
-        sel_best = alt.selection_point(fields=["Cliente"], name="SEL_BEST", clear="dblclick")
-        ch = bar_rank(df_best, "Cliente", "Share_Fac", sel_best, "Maior Share FAC (YoY indisponível)", C_GREEN, "pct", 420)
-        with st.container(height=480, border=False):
-            st.altair_chart(ch, use_container_width=True, on_select="rerun", key=K_BEST)
-        click = selected_value_from_chart_state(K_BEST, "SEL_BEST", "Cliente")
-
-    if click:
-        st.session_state.update({"cli_focus": str(click), "cli_uf_focus": None, "cli_mix_focus": None})
-
-with colB:
-    if has_yoy:
-        st.markdown("##### ⚠️ Piores (perda relevante)")
-        df_worst = df_rel.sort_values("ImpactShare", ascending=True).head(TOP)
-        sel_worst = alt.selection_point(fields=["Cliente"], name="SEL_WORST", clear="dblclick")
-        ch = bar_rank(df_worst, "Cliente", "ImpactShare", sel_worst, "Maior perda (Qtde) via share", C_FAC, "int", 420)
-        with st.container(height=480, border=False):
-            st.altair_chart(ch, use_container_width=True, on_select="rerun", key=K_WORST)
-        click = selected_value_from_chart_state(K_WORST, "SEL_WORST", "Cliente")
-    else:
-        st.markdown("##### ⚠️ Menor Share FACCHINI")
-        df_worst = df_rel.sort_values("Share_Fac", ascending=True).head(TOP)
-        sel_worst = alt.selection_point(fields=["Cliente"], name="SEL_WORST", clear="dblclick")
-        ch = bar_rank(df_worst, "Cliente", "Share_Fac", sel_worst, "Menor Share FAC (YoY indisponível)", C_FAC, "pct", 420)
-        with st.container(height=480, border=False):
-            st.altair_chart(ch, use_container_width=True, on_select="rerun", key=K_WORST)
-        click = selected_value_from_chart_state(K_WORST, "SEL_WORST", "Cliente")
-
-    if click:
-        st.session_state.update({"cli_focus": str(click), "cli_uf_focus": None, "cli_mix_focus": None})
-
-with colC:
-    st.markdown("##### 🎯 Maior Opp (tomar do líder)")
-    df_opp = df_rel.sort_values("OppTake", ascending=False).head(TOP)
-    sel_opp = alt.selection_point(fields=["Cliente"], name="SEL_OPP", clear="dblclick")
-    ch = bar_rank(df_opp, "Cliente", "OppTake", sel_opp, "Oportunidade (Qtde)", C_COMP, "int", 420)
-    with st.container(height=480, border=False):
-        st.altair_chart(ch, use_container_width=True, on_select="rerun", key=K_OPP)
-
-    click = selected_value_from_chart_state(K_OPP, "SEL_OPP", "Cliente")
-    if click:
-        st.session_state.update({"cli_focus": str(click), "cli_uf_focus": None, "cli_mix_focus": None})
-
-with colD:
-    st.markdown("##### 🧱 Maior WhiteSpace")
-    df_ws = df_rel.sort_values("WhiteSpace", ascending=False).head(TOP)
-    sel_ws = alt.selection_point(fields=["Cliente"], name="SEL_WS", clear="dblclick")
-    ch = bar_rank(df_ws, "Cliente", "WhiteSpace", sel_ws, "Espaço total", C_GRAY, "int", 420)
-    with st.container(height=480, border=False):
-        st.altair_chart(ch, use_container_width=True, on_select="rerun", key=K_WS)
-
-    click = selected_value_from_chart_state(K_WS, "SEL_WS", "Cliente")
-    if click:
-        st.session_state.update({"cli_focus": str(click), "cli_uf_focus": None, "cli_mix_focus": None})
-
-st.write("---")
-
-# ============================================================
-# 3) MAPA DA CARTEIRA
-# ============================================================
-ui.section("🗺️ 3) Mapa da carteira (macro decisão)")
-
-df_map = df_clients.sort_values("Market", ascending=False).head(700).copy()
-sel_map = alt.selection_point(fields=["Cliente"], name="SEL_MAP", clear="dblclick")
-ch_map = scatter_carteira(df_map, sel_map)
-
-with st.container(height=560, border=False):
-    st.altair_chart(ch_map, use_container_width=True, on_select="rerun", key=K_MAP)
-
-clicked = selected_value_from_chart_state(K_MAP, "SEL_MAP", "Cliente")
-if clicked:
-    st.session_state.update({"cli_focus": str(clicked), "cli_uf_focus": None, "cli_mix_focus": None})
-
-st.caption(
-    "Definições: **Atacar** (grande + share baixo), **Defender** (grande + share alto), "
-    "**Risco** (defender, mas perdendo share), **Cultivar** (pequeno + share baixo), **Manter** (pequeno + share ok)."
-)
-
-st.write("---")
-
-# ============================================================
-# 4) SELEÇÃO EXPLÍCITA
-# ============================================================
-ui.section("🎯 4) Selecionar cliente para aprofundar")
-
-clientes_sorted = df_clients.sort_values("Market", ascending=False)["Cliente"].astype(str).tolist()
-focus_default = st.session_state.get("cli_focus") if st.session_state.get("cli_focus") in clientes_sorted else clientes_sorted[0]
-
-csel1, csel2, csel3 = st.columns([2.3, 1.0, 1.0], gap="medium")
-with csel1:
-    picked = st.selectbox("Cliente em foco", clientes_sorted, index=clientes_sorted.index(focus_default))
-    if picked != st.session_state.get("cli_focus"):
-        st.session_state.update({"cli_focus": str(picked), "cli_uf_focus": None, "cli_mix_focus": None})
-
-with csel2:
-    if st.button("Limpar UF/Mix", use_container_width=True):
-        st.session_state["cli_uf_focus"] = None
-        st.session_state["cli_mix_focus"] = None
-        st.rerun()
-
-with csel3:
-    if st.button("Reset foco", use_container_width=True):
-        st.session_state.update({"cli_focus": clientes_sorted[0], "cli_uf_focus": None, "cli_mix_focus": None})
-        st.rerun()
-
-# ============================================================
-# Barra sticky de contexto do foco (melhora muito navegação)
-# ============================================================
-focus_client = st.session_state.get("cli_focus")
-row_cli = df_clients[df_clients["Cliente"].astype(str).eq(str(focus_client))].iloc[0]
-
-uf_focus = st.session_state.get("cli_uf_focus") or "Todas"
-mix_focus = st.session_state.get("cli_mix_focus") or "Todos"
-
-st.markdown(f"""
-<div class="sticky-focus">
-  <div style="display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
-    <div style="color: rgba(148,163,184,.95); font-size:.85rem; letter-spacing:.04em; text-transform:uppercase;">Foco</div>
-    <div style="font-weight:700;">{focus_client}</div>
-    <div style="opacity:.75;">|</div>
-    <div><span style="opacity:.75;">UF:</span> <b>{uf_focus}</b></div>
-    <div><span style="opacity:.75;">Mix:</span> <b>{mix_focus}</b></div>
-    <div style="opacity:.75;">|</div>
-    <div><span style="opacity:.75;">Macro:</span> <b>{row_cli["Cluster"]}</b></div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-st.write("---")
-
-# ============================================================
-# Helpers: líder do slice (UF/Mix) vs FAC
-# ============================================================
-def calc_vs_fac_leader_dim(df_base: pd.DataFrame, dim: str) -> pd.DataFrame:
-    """
-    Para cada categoria do dim:
-      - Market
-      - Facchini
-      - Leader (implementadora líder do slice, excluindo FACCHINI)
-      - OppVol = max(share_leader - share_fac, 0) * market
-    """
-    if df_base.empty:
-        return pd.DataFrame(columns=[
-            dim, "Market", "Facchini", "Leader", "LeaderVol",
-            "Share_Fac", "Share_Leader", "Gap_pp", "OppVol", "Sign"
-        ])
-
-    m = df_base.groupby(dim, as_index=False).agg(Market=("Qtde", "sum"))
-    f = (df_base[df_base["Implementadora"].eq(FACCHINI)]
-         .groupby(dim, as_index=False).agg(Facchini=("Qtde", "sum")))
-
-    # líder por slice (exclui FACCHINI)
-    comp = (df_base[df_base["Implementadora"].ne(FACCHINI)]
-            .groupby([dim, "Implementadora"], as_index=False)
-            .agg(LeaderVol=("Qtde", "sum"))
-            .sort_values([dim, "LeaderVol"], ascending=[True, False]))
-
-    topc = comp.drop_duplicates(dim, keep="first").rename(columns={"Implementadora": "Leader"})
-
-    out = (m.merge(f, on=dim, how="left")
-             .merge(topc, on=dim, how="left"))
-
-    out["Facchini"] = out["Facchini"].fillna(0)
-    out["Leader"] = out["Leader"].fillna("—")
-    out["LeaderVol"] = out["LeaderVol"].fillna(0)
-
-    out["Share_Fac"] = (out["Facchini"] / out["Market"]).fillna(0)
-    out["Share_Leader"] = (out["LeaderVol"] / out["Market"]).fillna(0)
-
-    # se não existe líder (Leader == "—"), share_leader = 0
-    out.loc[out["Leader"].eq("—"), "Share_Leader"] = 0.0
-
-    out["Gap_pp"] = (out["Share_Leader"] - out["Share_Fac"]) * 100.0
-    out["OppVol"] = ((out["Share_Leader"] - out["Share_Fac"]).clip(lower=0) * out["Market"]).fillna(0)
-
-    # quem está na frente no slice
-    out["Sign"] = np.where(out["Share_Fac"] >= out["Share_Leader"], "FAC", "LEADER")
-
-    return out
-
-def leader_in_slice(df_slice: pd.DataFrame) -> str:
-    if df_slice.empty:
-        return "—"
-    tmp = (df_slice[df_slice["Implementadora"].ne(FACCHINI)]
-           .groupby("Implementadora", as_index=False)["Qtde"].sum()
-           .sort_values("Qtde", ascending=False))
-    if tmp.empty:
-        return "—"
-    return str(tmp.iloc[0]["Implementadora"])
-
-# ============================================================
-# 5/6/7) PLAYBOOK + HISTÓRICO + RAIO-X em TABS (menos scroll)
-# ============================================================
-ui.section("🔎 5) Playbook do cliente • 📈 Histórico • 📂 Raio-X")
-
-tab_play, tab_hist, tab_rx = st.tabs(["🔎 Playbook", "📈 Histórico", "📂 Raio-X"])
-
-# Base do cliente
-df_c_all = df_scope[df_scope["Cliente"].astype(str).eq(str(focus_client))].copy()
-
-# aplica filtros de foco (UF/Mix) quando existirem
-def apply_focus_filters(df_in: pd.DataFrame) -> pd.DataFrame:
-    df_out = df_in.copy()
-    if st.session_state.get("cli_uf_focus"):
-        df_out = df_out[df_out["UF"].eq(st.session_state["cli_uf_focus"])]
-    if st.session_state.get("cli_mix_focus"):
-        df_out = df_out[df_out["Mix Produto"].eq(st.session_state["cli_mix_focus"])]
-    return df_out
-
-with tab_play:
-    if df_c_all.empty:
-        st.info("Sem dados para o cliente no recorte atual.")
-        st.stop()
-
-    # Concorrente #1 "macro" (do modelo)
-    comp1_macro = str(row_cli["Comp1"])
-
-    df_c = df_c_all.copy()
-    market_c = int(df_c["Qtde"].sum())
-    fac_c = int(df_c.loc[df_c["Implementadora"].eq(FACCHINI), "Qtde"].sum())
-    share_fac_c = (fac_c / market_c) if market_c > 0 else 0
-
-    comp_c = int(df_c.loc[df_c["Implementadora"].eq(comp1_macro), "Qtde"].sum()) if comp1_macro != "—" else 0
-    share_comp_c = (comp_c / market_c) if market_c > 0 else 0
-
-    # líder no recorte atual (considerando UF/Mix foco)
-    df_slice = apply_focus_filters(df_c_all)
-    leader_slice = leader_in_slice(df_slice)
-
-    k1, k2, k3, k4, k5 = st.columns([1.6, 1, 1, 1, 1], gap="large")
-    with k1:
-        st.markdown(
-            small_metric("Cliente", str(focus_client), f"Macro: {row_cli['Cluster']}", "kpi-gray", value_class="metric-value--title"),
-            unsafe_allow_html=True
-        )
-    with k2:
-        st.markdown(small_metric("Mercado", fmt_int(market_c), "Qtde no recorte", "kpi-gray"), unsafe_allow_html=True)
-    with k3:
-        sub = f"Share: {share_fac_c*100:.1f}%"
-        sub += f" • ΔYoY: {fmt_pp(row_cli['dShareFac'])}"
-        st.markdown(small_metric("FACCHINI", fmt_int(fac_c), sub, "kpi-red"), unsafe_allow_html=True)
-    with k4:
-        st.markdown(
-            small_metric("Conc. #1 (macro)", comp1_macro, f"Share: {share_comp_c*100:.1f}%", "kpi-blue", value_class="metric-value--title"),
-            unsafe_allow_html=True
-        )
-    with k5:
-        st.markdown(
-            small_metric("Líder no recorte (UF/Mix)", leader_slice, "dinâmico por slice", "kpi-blue", value_class="metric-value--title"),
-            unsafe_allow_html=True
-        )
-
-    st.write("")
-
-    cA, cB, cC = st.columns([1, 1, 1], gap="large")
-
-    with cA:
-        st.markdown("##### 📍 Onde (UF) — Opp (Qtde) vs líder do UF")
-        df_uf = calc_vs_fac_leader_dim(df_c_all, "UF")
-        df_uf = df_uf[df_uf["Market"] > 0].sort_values("OppVol", ascending=False).head(30).copy()
-
-        sel_uf = alt.selection_point(fields=["UF"], name="SEL_UF", clear="dblclick")
-
-        dfp = df_uf.copy()
-        dfp["_lab"] = dfp["OppVol"].apply(fmt_int)
-        dfp["__y"] = dfp["UF"].astype(str) + " · " + dfp["_lab"].astype(str)
-        axis_right = alt.Axis(orient="right", title=None, labelFontSize=12, ticks=False, domain=False, labelPadding=10)
-
-        ch = (
-            alt.Chart(dfp).mark_bar()
-            .encode(
-                x=alt.X("OppVol:Q", title=None),
-                y=alt.Y("__y:N", sort="-x", axis=axis_right),
-                color=alt.Color("Sign:N", scale=alt.Scale(domain=["FAC", "LEADER"], range=[C_FAC, C_COMP]), legend=None),
-                opacity=alt.condition(sel_uf, alt.value(1), alt.value(0.55)),
-                tooltip=[
-                    alt.Tooltip("UF:N"),
-                    alt.Tooltip("Market:Q", title="Mercado", format=",.0f"),
-                    alt.Tooltip("Leader:N", title="Líder (UF)"),
-                    alt.Tooltip("Gap_pp:Q", title="Gap vs líder (pp)", format="+.1f"),
-                    alt.Tooltip("OppVol:Q", title="Opp (Qtde)", format=",.0f"),
-                ],
-            )
-            .add_params(sel_uf)
-            .properties(height=max(420, len(dfp) * 22), title="Clique para focar UF")
-            .configure_view(stroke=None)
-            .configure(background="transparent")
-            .configure_axis(grid=False)
-        )
-
-        with st.container(height=520, border=False):
-            st.altair_chart(ch, use_container_width=True, on_select="rerun", key=K_UF)
-
-        uf_clicked = selected_value_from_chart_state(K_UF, "SEL_UF", "UF")
-        if uf_clicked != st.session_state.get("cli_uf_focus"):
-            st.session_state["cli_mix_focus"] = None
-        st.session_state["cli_uf_focus"] = uf_clicked
-
-    with cB:
-        st.markdown("##### 🧩 Em que (Mix) — Opp (Qtde) vs líder do Mix")
-        df_mix_base = df_c_all.copy()
-        if st.session_state.get("cli_uf_focus"):
-            df_mix_base = df_mix_base[df_mix_base["UF"].eq(st.session_state["cli_uf_focus"])]
-
-        df_mix = calc_vs_fac_leader_dim(df_mix_base, "Mix Produto")
-        df_mix = df_mix[df_mix["Market"] > 0].sort_values("OppVol", ascending=False).head(30).copy()
-
-        sel_mix = alt.selection_point(fields=["Mix Produto"], name="SEL_MIX", clear="dblclick")
-
-        dfp = df_mix.copy()
-        dfp["_lab"] = dfp["OppVol"].apply(fmt_int)
-        dfp["__y"] = dfp["Mix Produto"].astype(str) + " · " + dfp["_lab"].astype(str)
-        axis_right = alt.Axis(orient="right", title=None, labelFontSize=12, ticks=False, domain=False, labelPadding=10)
-
-        ch = (
-            alt.Chart(dfp).mark_bar()
-            .encode(
-                x=alt.X("OppVol:Q", title=None),
-                y=alt.Y("__y:N", sort="-x", axis=axis_right),
-                color=alt.Color("Sign:N", scale=alt.Scale(domain=["FAC", "LEADER"], range=[C_FAC, C_COMP]), legend=None),
-                opacity=alt.condition(sel_mix, alt.value(1), alt.value(0.55)),
-                tooltip=[
-                    alt.Tooltip("Mix Produto:N", title="Mix"),
-                    alt.Tooltip("Market:Q", title="Mercado", format=",.0f"),
-                    alt.Tooltip("Leader:N", title="Líder (Mix)"),
-                    alt.Tooltip("Gap_pp:Q", title="Gap vs líder (pp)", format="+.1f"),
-                    alt.Tooltip("OppVol:Q", title="Opp (Qtde)", format=",.0f"),
-                ],
-            )
-            .add_params(sel_mix)
-            .properties(height=max(420, len(dfp) * 22), title="Clique para focar Mix")
-            .configure_view(stroke=None)
-            .configure(background="transparent")
-            .configure_axis(grid=False)
-        )
-
-        with st.container(height=520, border=False):
-            st.altair_chart(ch, use_container_width=True, on_select="rerun", key=K_MIX)
-
-        mix_clicked = selected_value_from_chart_state(K_MIX, "SEL_MIX", "Mix Produto")
-        st.session_state["cli_mix_focus"] = mix_clicked
-
-    with cC:
-        st.markdown("##### 🏭 Contra quem (Implementadoras) — no recorte selecionado")
-
-        df_impl = apply_focus_filters(df_c_all)
-        leader_now = leader_in_slice(df_impl)
-
-        impl = (df_impl.groupby("Implementadora", as_index=False)["Qtde"].sum()
-                .rename(columns={"Qtde": "Volume"})
-                .sort_values("Volume", ascending=False)
-                .head(25).copy())
-
-        if impl.empty:
-            st.info("Sem dados no recorte.")
-        else:
-            def role(x: str) -> str:
-                x = str(x)
-                if x == FACCHINI:
-                    return "FAC"
-                if x == leader_now:
-                    return "LEADER"
-                return "OTH"
-
-            impl["Role"] = impl["Implementadora"].apply(role)
-            impl["_lab"] = impl["Volume"].apply(fmt_int)
-            impl["__y"] = impl["Implementadora"].astype(str) + " · " + impl["_lab"].astype(str)
-
-            axis_right = alt.Axis(orient="right", title=None, labelFontSize=12, ticks=False, domain=False, labelPadding=10)
-            color_scale = alt.Scale(domain=["FAC", "LEADER", "OTH"], range=[C_FAC, C_COMP, C_GRAY])
-
-            ch = (
-                alt.Chart(impl).mark_bar()
-                .encode(
-                    x=alt.X("Volume:Q", title=None),
-                    y=alt.Y("__y:N", sort="-x", axis=axis_right),
-                    color=alt.Color("Role:N", scale=color_scale, legend=None),
-                    tooltip=[alt.Tooltip("Implementadora:N"), alt.Tooltip("Volume:Q", format=",.0f")],
-                )
-                .properties(height=max(420, len(impl) * 22), title=f"FACCHINI (vermelho) | Líder do recorte (azul): {leader_now}")
-                .configure_view(stroke=None)
-                .configure(background="transparent")
-                .configure_axis(grid=False)
-            )
-
-            with st.container(height=520, border=False):
-                st.altair_chart(ch, use_container_width=True)
-
-with tab_hist:
-    df_hist = df_scope_all.copy()
-    df_hist = df_hist[df_hist["Cliente"].astype(str).eq(str(focus_client))]
-    df_hist = apply_focus_filters(df_hist)
-
-    if df_hist.empty:
-        st.info("Sem histórico para o recorte atual.")
-    else:
-        # líder do histórico no slice (para série concorrente)
-        leader_hist = leader_in_slice(df_hist)
-
-        hist_market = df_hist.groupby("Ano", as_index=False).agg(Mercado=("Qtde", "sum"))
-        hist_fac = (df_hist[df_hist["Implementadora"].eq(FACCHINI)]
-                    .groupby("Ano", as_index=False).agg(FACCHINI=("Qtde", "sum")))
-        hist_lead = (df_hist[df_hist["Implementadora"].eq(leader_hist)]
-                     .groupby("Ano", as_index=False).agg(Lider=("Qtde", "sum"))) if leader_hist != "—" else pd.DataFrame({"Ano": [], "Lider": []})
-
-        hist = hist_market.merge(hist_fac, on="Ano", how="left").merge(hist_lead, on="Ano", how="left")
-        hist["FACCHINI"] = hist["FACCHINI"].fillna(0)
-        hist["Lider"] = hist["Lider"].fillna(0)
-
-        melt = hist.melt(
-            id_vars=["Ano"],
-            value_vars=["Mercado", "FACCHINI", "Lider"],
-            var_name="Série",
-            value_name="Qtde"
-        ).sort_values("Ano")
-
-        color_scale = alt.Scale(domain=["Mercado", "FACCHINI", "Lider"], range=[C_GRAY, C_FAC, C_COMP])
-
-        line = (
-            alt.Chart(melt).mark_line(point=True)
-            .encode(
-                x=alt.X("Ano:O", title=None),
-                y=alt.Y("Qtde:Q", title=None),
-                color=alt.Color("Série:N", scale=color_scale, legend=alt.Legend(title=None)),
-                tooltip=[
-                    alt.Tooltip("Ano:O", title="Ano"),
-                    alt.Tooltip("Série:N", title="Série"),
-                    alt.Tooltip("Qtde:Q", title="Qtde", format=",.0f"),
-                ],
-            )
-            .properties(height=380, title=f"Histórico no recorte (Líder: {leader_hist})")
-            .configure_view(stroke=None)
-            .configure(background="transparent")
-            .configure_axis(grid=False)
-        )
-
-        st.altair_chart(line, use_container_width=True)
-
-with tab_rx:
-    df_rx = apply_focus_filters(df_c_all)
-
-    cols = ["Ano", "Tipo", "UF", "Municipio", "Cliente", "Implementadora", "Mix Produto", "Modelo", "Representante", "Qtde"]
-    cols = [c for c in cols if c in df_rx.columns]
-
-    st.dataframe(
-        df_rx[cols].sort_values("Qtde", ascending=False).head(2000),
-        use_container_width=True,
-        hide_index=True
-    )
